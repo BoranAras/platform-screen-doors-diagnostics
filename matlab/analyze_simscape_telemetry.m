@@ -3,21 +3,23 @@ clc;
 
 % =========================================================================
 % 0. DATA EXTRACTION & UNIT CONVERSION (m/s^2 -> g)
+% Note: Output field names (e.g., zaman_verisi, sim_position_sag) match the
+%       To Workspace block names defined inside platform_screen_doors_multibody.slx
 % =========================================================================
 if ~exist('out', 'var')
-    error('ERROR: "out" variable not found in workspace! Please run the PSD / PAKS simulation model first.');
+    error('ERROR: "out" variable not found in workspace. Run the Simscape simulation model first.');
 end
 
-% Time vector extraction
+% Extract simulation time vector
 if isprop(out, 'zaman_verisi') || isfield(out, 'zaman_verisi')
     t_raw = out.zaman_verisi;
 elseif isprop(out, 'tout') || isfield(out, 'tout')
     t_raw = out.tout;
 else
-    error('Time vector could not be resolved. Please verify Simulink logging.');
+    error('Time vector could not be resolved. Verify Simulink output logging.');
 end
 
-% Helper function for signal parsing
+% Helper function for Simulink signal parsing
 function data = parse_sim_data(sig)
     if isa(sig, 'timeseries')
         data = sig.Data;
@@ -29,169 +31,177 @@ function data = parse_sim_data(sig)
 end
 
 % Standard gravitational acceleration (m/s^2 -> g conversion)
-g_std = 9.81; 
+g_std = 9.81;
 
-% Right Door Telemetry (converted to g)
-a_sag = squeeze(parse_sim_data(out.sim_acceleration)) / g_std;
-p_sag = squeeze(parse_sim_data(out.sim_position_sag));
+% Right door leaf telemetry (acceleration converted to g)
+acc_right = squeeze(parse_sim_data(out.sim_acceleration)) / g_std;
+pos_right = squeeze(parse_sim_data(out.sim_position_sag));
 
-% Left Door Telemetry (converted to g)
-a_sol = squeeze(parse_sim_data(out.sim_acceleration2)) / g_std;
-p_sol = squeeze(parse_sim_data(out.sim_position_sol));
+% Left door leaf telemetry (acceleration converted to g)
+acc_left = squeeze(parse_sim_data(out.sim_acceleration2)) / g_std;
+pos_left = squeeze(parse_sim_data(out.sim_position_sol));
 
-% Time Vector
+% Time vector formatting
 if isa(t_raw, 'timeseries')
     t = squeeze(t_raw.Time);
 else
     t = squeeze(t_raw);
 end
 
-% Reshape to column vectors
-t = t(:); 
-a_sag = a_sag(:); 
-p_sag = p_sag(:); 
-a_sol = a_sol(:); 
-p_sol = p_sol(:);
+% Ensure column vectors
+t = t(:);
+acc_right = acc_right(:);
+pos_right = pos_right(:);
+acc_left = acc_left(:);
+pos_left = pos_left(:);
 
 % =========================================================================
-% 1. RIGHT DOOR DYNAMIC ATTENUATION (Distance Modeling)
+% 1. RIGHT DOOR EXPLORATORY DISTANCE-DEPENDENT ATTENUATION
 % =========================================================================
-kapi_genisligi = 0.8;       
-sensor_konumu = 2.0;        
-kapi_sag_uc_koordinati = p_sag + kapi_genisligi;
-mesafe_sag = sensor_konumu - kapi_sag_uc_koordinati; 
-sag_katsayi_uzakta = 0.3; 
-sag_katsayi_yakinda = 1.0; 
+door_width = 0.8;          % Door leaf width (m)
+sensor_position = 2.0;     % Reference accelerometer mounting location (m)
 
-max_mesafe_sag = max(mesafe_sag); 
-min_mesafe_sag = min(mesafe_sag);
+right_edge_coord = pos_right + door_width;
+dist_right = sensor_position - right_edge_coord;
 
-if max_mesafe_sag == min_mesafe_sag
-    dinamik_katsayi_sag = ones(size(mesafe_sag)) * sag_katsayi_yakinda;
+right_weight_far = 0.30;
+right_weight_near = 1.00;
+
+max_dist_right = max(dist_right);
+min_dist_right = min(dist_right);
+
+if max_dist_right == min_dist_right
+    weight_right = ones(size(dist_right)) * right_weight_near;
 else
-    dinamik_katsayi_sag = sag_katsayi_uzakta + ((max_mesafe_sag - mesafe_sag) / (max_mesafe_sag - min_mesafe_sag)) * (sag_katsayi_yakinda - sag_katsayi_uzakta);
+    weight_right = right_weight_far + ...
+        ((max_dist_right - dist_right) / (max_dist_right - min_dist_right)) * ...
+        (right_weight_near - right_weight_far);
 end
 
-a_sag_dinamik = a_sag .* dinamik_katsayi_sag;
+acc_right_weighted = acc_right .* weight_right;
 
 % =========================================================================
-% 2. LEFT DOOR DYNAMIC ATTENUATION (Distance Modeling)
+% 2. LEFT DOOR EXPLORATORY DISTANCE-DEPENDENT ATTENUATION
 % =========================================================================
-stroke_sol = abs(p_sol); 
-sol_kapi_sag_uc = -stroke_sol;
-mesafe_sol = sensor_konumu - sol_kapi_sag_uc; 
+left_stroke = abs(pos_left);
+left_edge_coord = -left_stroke;
+dist_left = sensor_position - left_edge_coord;
 
-sol_katsayi_yakinda = 0.25; 
-sol_katsayi_uzakta  = 0.10; 
+left_weight_near = 0.25;
+left_weight_far  = 0.10;
 
-max_mesafe_sol = max(mesafe_sol); 
-min_mesafe_sol = min(mesafe_sol);
+max_dist_left = max(dist_left);
+min_dist_left = min(dist_left);
 
-if max_mesafe_sol == min_mesafe_sol
-    dinamik_katsayi_sol = ones(size(mesafe_sol)) * sol_katsayi_yakinda;
+if max_dist_left == min_dist_left
+    weight_left = ones(size(dist_left)) * left_weight_near;
 else
-    dinamik_katsayi_sol = sol_katsayi_uzakta + ((max_mesafe_sol - mesafe_sol) / (max_mesafe_sol - min_mesafe_sol)) * (sol_katsayi_yakinda - sol_katsayi_uzakta);
+    weight_left = left_weight_far + ...
+        ((max_dist_left - dist_left) / (max_dist_left - min_dist_left)) * ...
+        (left_weight_near - left_weight_far);
 end
 
-a_sol_dinamik = a_sol .* dinamik_katsayi_sol;
+acc_left_weighted = acc_left .* weight_left;
 
 % =========================================================================
-% 3. PHYSICAL SENSOR SUPERPOSITION
+% 3. SUPERPOSED SIGNAL AT ACCELEROMETER LOCATION
 % =========================================================================
-a_toplam = a_sag_dinamik + a_sol_dinamik;
-
-% =========================================================================
-% 4. RMS ENVELOPE & FFT SPECTRAL CALCULATIONS
-% =========================================================================
-Ts = mean(diff(t)); 
-Fs = 1/Ts;
-window_length = max(round(0.05 * Fs), 1);
-
-% Moving RMS calculations for individual doors
-rms_sag = sqrt(movmean(a_sag_dinamik.^2, window_length));
-rms_sol = sqrt(movmean(a_sol_dinamik.^2, window_length));
-
-% Root-Sum-Square (RSS) combined RMS
-rms_toplam = sqrt(rms_sag.^2 + rms_sol.^2);
-
-% FFT Spectral Analysis
-L_toplam = length(a_toplam); 
-
-Y_sag = fft(a_sag_dinamik);
-P2_sag = abs(Y_sag/L_toplam); 
-P1_sag = P2_sag(1:floor(L_toplam/2)+1); 
-P1_sag(2:end-1) = 2*P1_sag(2:end-1);
-
-Y_sol = fft(a_sol_dinamik);
-P2_sol = abs(Y_sol/length(a_sol_dinamik)); 
-P1_sol = P2_sol(1:floor(length(a_sol_dinamik)/2)+1); 
-P1_sol(2:end-1) = 2*P1_sol(2:end-1);
-
-Y_toplam = fft(a_toplam);
-P2_toplam = abs(Y_toplam/L_toplam); 
-P1_toplam = P2_toplam(1:floor(L_toplam/2)+1); 
-P1_toplam(2:end-1) = 2*P1_toplam(2:end-1);
-
-r_freq = Fs*(0:(floor(L_toplam/2)))/L_toplam;
+acc_total = acc_right_weighted + acc_left_weighted;
 
 % =========================================================================
-% 5. TABBED GRAPHICAL VISUALIZATION (ENGLISH ANNOTATIONS)
+% 4. MOVING RMS ENVELOPE & SINGLE-SIDED FFT SPECTRUM
 % =========================================================================
-fig = figure('Name', 'PSD Digital Twin Vibration & Spectral Analysis (g-Unit)', 'NumberTitle', 'off', 'Position', [100 100 1000 800]);
+dt_mean = mean(diff(t));
+fs = 1 / dt_mean;
+window_samples = max(round(0.05 * fs), 1);  % 50 ms moving RMS window
+
+% Individual door moving RMS envelopes
+rms_right = sqrt(movmean(acc_right_weighted.^2, window_samples));
+rms_left  = sqrt(movmean(acc_left_weighted.^2, window_samples));
+
+% Combined moving RMS (computed directly on superposed signal)
+rms_total = sqrt(movmean(acc_total.^2, window_samples));
+
+% Single-sided FFT amplitude spectra
+n_total = length(acc_total);
+
+fft_right = fft(acc_right_weighted);
+p2_right = abs(fft_right / n_total);
+p1_right = p2_right(1:floor(n_total/2)+1);
+p1_right(2:end-1) = 2 * p1_right(2:end-1);
+
+n_left = length(acc_left_weighted);
+fft_left = fft(acc_left_weighted);
+p2_left = abs(fft_left / n_left);
+p1_left = p2_left(1:floor(n_left/2)+1);
+p1_left(2:end-1) = 2 * p1_left(2:end-1);
+
+fft_total = fft(acc_total);
+p2_total = abs(fft_total / n_total);
+p1_total = p2_total(1:floor(n_total/2)+1);
+p1_total(2:end-1) = 2 * p1_total(2:end-1);
+
+freq_axis = fs * (0:floor(n_total/2)) / n_total;
+
+% =========================================================================
+% 5. TABBED GRAPHICAL VISUALIZATION
+% =========================================================================
+fig = figure('Name', 'PSD Simulation Vibration & Spectral Analysis (g-Unit)', ...
+             'NumberTitle', 'off', 'Position', [100 100 1000 800]);
 tgroup = uitabgroup(fig);
 
 % --- TAB 1: RIGHT DOOR ---
 tab1 = uitab(tgroup, 'Title', 'Right Door Dynamics');
-subplot(3,1,1, 'Parent', tab1); 
-plot(t, mesafe_sag, 'b', 'LineWidth', 1.5); 
-title('Right Door - Relative Sensor Distance (m)'); 
+subplot(3,1,1, 'Parent', tab1);
+plot(t, dist_right, 'b', 'LineWidth', 1.5);
+title('Right Door - Relative Sensor Distance (m)');
 xlabel('Time (s)'); ylabel('Distance (m)'); grid on;
 
-subplot(3,1,2, 'Parent', tab1); 
-plot(t, a_sag_dinamik, 'g'); hold on; 
-plot(t, rms_sag, 'r', 'LineWidth', 2); 
-title('Right Door Dynamic Acceleration & RMS Envelope (g)'); 
-xlabel('Time (s)'); ylabel('Acceleration (g)'); 
-legend('Raw Vibration (g)','RMS Envelope (g)', 'Location', 'northeast'); grid on;
+subplot(3,1,2, 'Parent', tab1);
+plot(t, acc_right_weighted, 'g'); hold on;
+plot(t, rms_right, 'r', 'LineWidth', 2);
+title('Right Door Dynamic Acceleration & Moving RMS Envelope (g)');
+xlabel('Time (s)'); ylabel('Acceleration (g)');
+legend('Simulated Vibration (g)', 'Moving RMS Envelope (g)', 'Location', 'northeast'); grid on;
 
-subplot(3,1,3, 'Parent', tab1); 
-plot(r_freq, P1_sag, 'm', 'LineWidth', 1.5); 
-title('Right Door Single-Sided Amplitude Spectrum (FFT)'); 
-xlabel('Frequency (Hz)'); ylabel('Amplitude |P1(f)| (g)'); 
+subplot(3,1,3, 'Parent', tab1);
+plot(freq_axis, p1_right, 'm', 'LineWidth', 1.5);
+title('Right Door Single-Sided Amplitude Spectrum (FFT)');
+xlabel('Frequency (Hz)'); ylabel('Amplitude |P1(f)| (g)');
 xlim([0 100]); grid on;
 
 % --- TAB 2: LEFT DOOR ---
 tab2 = uitab(tgroup, 'Title', 'Left Door Dynamics');
-subplot(3,1,1, 'Parent', tab2); 
-plot(t, mesafe_sol, 'm', 'LineWidth', 1.5); 
-title('Left Door - Relative Sensor Distance (m)'); 
+subplot(3,1,1, 'Parent', tab2);
+plot(t, dist_left, 'm', 'LineWidth', 1.5);
+title('Left Door - Relative Sensor Distance (m)');
 xlabel('Time (s)'); ylabel('Distance (m)'); grid on;
 
-subplot(3,1,2, 'Parent', tab2); 
-plot(t, a_sol_dinamik, 'c'); hold on; 
-plot(t, rms_sol, 'r', 'LineWidth', 2); 
-title('Left Door Dynamic Acceleration & RMS Envelope (g)'); 
-xlabel('Time (s)'); ylabel('Acceleration (g)'); 
-legend('Raw Vibration (g)','RMS Envelope (g)', 'Location', 'northeast'); grid on;
+subplot(3,1,2, 'Parent', tab2);
+plot(t, acc_left_weighted, 'c'); hold on;
+plot(t, rms_left, 'r', 'LineWidth', 2);
+title('Left Door Dynamic Acceleration & Moving RMS Envelope (g)');
+xlabel('Time (s)'); ylabel('Acceleration (g)');
+legend('Simulated Vibration (g)', 'Moving RMS Envelope (g)', 'Location', 'northeast'); grid on;
 
-subplot(3,1,3, 'Parent', tab2); 
-plot(r_freq, P1_sol, 'm', 'LineWidth', 1.5); 
-title('Left Door Single-Sided Amplitude Spectrum (FFT)'); 
-xlabel('Frequency (Hz)'); ylabel('Amplitude |P1(f)| (g)'); 
+subplot(3,1,3, 'Parent', tab2);
+plot(freq_axis, p1_left, 'm', 'LineWidth', 1.5);
+title('Left Door Single-Sided Amplitude Spectrum (FFT)');
+xlabel('Frequency (Hz)'); ylabel('Amplitude |P1(f)| (g)');
 xlim([0 100]); grid on;
 
-% --- TAB 3: COMBINED PHYSICAL SENSOR TELEMETRY ---
-tab3 = uitab(tgroup, 'Title', 'Superimposed Sensor Telemetry');
+% --- TAB 3: COMBINED TELEMETRY ---
+tab3 = uitab(tgroup, 'Title', 'Superposed Sensor Telemetry');
 subplot(2,1,1, 'Parent', tab3);
-plot(t, a_toplam, 'Color', [0.45 0.45 0.45], 'DisplayName', 'Superimposed Raw Signal (g)'); 
-hold on; 
-plot(t, rms_toplam, 'r', 'LineWidth', 2.5, 'DisplayName', 'RSS Combined RMS Envelope (g)');
-title('Unified Physical Telemetry at Accelerometer Location (Right + Left Superposition)');
-xlabel('Time (s)'); ylabel('Acceleration (g)'); 
+plot(t, acc_total, 'Color', [0.45 0.45 0.45], 'DisplayName', 'Superposed Simulated Signal (g)');
+hold on;
+plot(t, rms_total, 'r', 'LineWidth', 2.5, 'DisplayName', 'Combined Moving RMS Envelope (g)');
+title('Combined Simulated Telemetry at Accelerometer Location (Right + Left)');
+xlabel('Time (s)'); ylabel('Acceleration (g)');
 legend('Location', 'northeast'); grid on;
 
 subplot(2,1,2, 'Parent', tab3);
-plot(r_freq, P1_toplam, 'b', 'LineWidth', 1.5);
-title('Global Frequency Signature (Combined FFT Spectrum)');
-xlabel('Frequency (Hz)'); ylabel('Amplitude |P1(f)| (g)'); 
+plot(freq_axis, p1_total, 'b', 'LineWidth', 1.5);
+title('Combined Frequency Spectrum (FFT)');
+xlabel('Frequency (Hz)'); ylabel('Amplitude |P1(f)| (g)');
 xlim([0 100]); grid on;
